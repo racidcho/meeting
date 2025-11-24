@@ -303,15 +303,32 @@ export default function HostViewPage() {
           </div>
         </div>
 
-        {/* End Round Button */}
+        {/* Discussion and End Round Buttons */}
         {allVoted && (
-          <div className="text-center">
+          <div className="text-center space-y-4">
+            <div className="bg-green-50 border-2 border-green-200 rounded-lg p-4">
+              <p className="text-lg font-semibold text-green-700 mb-2">
+                모든 가족이 선택을 완료했습니다!
+              </p>
+              <p className="text-sm text-green-600 mb-4">
+                각 가족이 선택한 이미지를 확인하고 이야기를 나눠보세요.
+              </p>
+              <button
+                onClick={() => router.push(`/room/${code}/discussion`)}
+                className="px-6 py-3 bg-green-500 text-white rounded-lg font-semibold hover:bg-opacity-90 transition"
+              >
+                선택 결과 보기
+              </button>
+            </div>
+            <div className="text-gray-500 text-sm">
+              또는 바로 다음 라운드로 진행할 수 있습니다.
+            </div>
             <button
               onClick={handleEndRound}
               disabled={loading}
               className="px-8 py-4 bg-gold text-white rounded-lg text-xl font-semibold hover:bg-opacity-90 transition disabled:opacity-50"
             >
-              {loading ? '처리 중...' : '라운드 종료'}
+              {loading ? '처리 중...' : '라운드 종료 및 다음 라운드로 진행'}
             </button>
           </div>
         )}

@@ -10,7 +10,7 @@ export default function HostPage() {
   const [room, setRoom] = useState<Room | null>(null);
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [rounds, setRounds] = useState<Round[]>([]);
-  const [photoUrl, setPhotoUrl] = useState('');
+  const [photoUrls, setPhotoUrls] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,19 +27,43 @@ export default function HostPage() {
     }
   };
 
-  const handleAddPhoto = async () => {
-    if (!room || !photoUrl.trim()) return;
+  const handleAddPhotos = async () => {
+    if (!room || !photoUrls.trim()) return;
+
+    // Parse URLs from textarea (split by newline, comma, or space)
+    const urls = photoUrls
+      .split(/\n|,|\s+/)
+      .map((url) => url.trim())
+      .filter((url) => url.length > 0 && (url.startsWith('http://') || url.startsWith('https://')));
+
+    if (urls.length === 0) {
+      setError('유효한 이미지 URL을 입력해주세요.');
+      return;
+    }
+
+    // Check if adding these photos would exceed the limit
+    if (photos.length + urls.length > 30) {
+      setError(`최대 30장까지 등록 가능합니다. (현재: ${photos.length}장, 추가 시도: ${urls.length}장)`);
+      return;
+    }
 
     try {
       setLoading(true);
       setError(null);
-      const newPhoto = await addPhoto({
-        room_id: room.id,
-        url: photoUrl.trim(),
-        order_index: photos.length,
-      });
-      setPhotos([...photos, newPhoto]);
-      setPhotoUrl('');
+      
+      // Add all photos sequentially
+      const newPhotos: Photo[] = [];
+      for (let i = 0; i < urls.length; i++) {
+        const newPhoto = await addPhoto({
+          room_id: room.id,
+          url: urls[i],
+          order_index: photos.length + i,
+        });
+        newPhotos.push(newPhoto);
+      }
+      
+      setPhotos([...photos, ...newPhotos]);
+      setPhotoUrls('');
     } catch (err) {
       setError(err instanceof Error ? err.message : '사진 추가 실패');
     } finally {
@@ -219,22 +243,26 @@ export default function HostPage() {
         {/* Photo Upload Section */}
         <div className="bg-white rounded-lg p-6 shadow-sm">
           <h2 className="text-xl font-bold mb-4">사진 등록 ({photos.length}/30)</h2>
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={photoUrl}
-              onChange={(e) => setPhotoUrl(e.target.value)}
-              placeholder="이미지 URL 입력"
-              className="flex-1 px-4 py-2 border border-gray-300 rounded-lg"
-              onKeyPress={(e) => e.key === 'Enter' && handleAddPhoto()}
-            />
-            <button
-              onClick={handleAddPhoto}
-              disabled={loading || !photoUrl.trim() || photos.length >= 30}
-              className="px-6 py-2 bg-gold text-white rounded-lg font-semibold hover:bg-opacity-90 transition disabled:opacity-50"
-            >
-              추가
-            </button>
+          <div className="space-y-3">
+            <div className="flex gap-2">
+              <textarea
+                value={photoUrls}
+                onChange={(e) => setPhotoUrls(e.target.value)}
+                placeholder="이미지 URL을 입력하세요.&#10;여러 개를 등록하려면 줄바꿈, 쉼표, 또는 공백으로 구분하세요.&#10;예:&#10;https://example.com/image1.jpg&#10;https://example.com/image2.jpg"
+                className="flex-1 px-4 py-2 border border-gray-300 rounded-lg resize-y min-h-[100px]"
+                rows={5}
+              />
+              <button
+                onClick={handleAddPhotos}
+                disabled={loading || !photoUrls.trim() || photos.length >= 30}
+                className="px-6 py-2 bg-gold text-white rounded-lg font-semibold hover:bg-opacity-90 transition disabled:opacity-50 self-start"
+              >
+                추가
+              </button>
+            </div>
+            <p className="text-sm text-gray-500">
+              💡 여러 사진을 한 번에 등록하려면 각 URL을 줄바꿈, 쉼표, 또는 공백으로 구분하세요.
+            </p>
           </div>
           {photos.length > 0 && (
             <div className="mt-4 grid grid-cols-3 gap-2">
@@ -318,7 +346,7 @@ export default function HostPage() {
                 );
               })}
             </div>
-            {isFinished && (
+            {room.status === 'finished' && (
               <button
                 onClick={() => router.push(`/room/${room.code}/result`)}
                 className="mt-4 w-full px-6 py-4 bg-gold text-white rounded-lg text-lg font-semibold hover:bg-opacity-90 transition"

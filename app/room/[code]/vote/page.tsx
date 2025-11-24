@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useParams } from 'next/navigation';
+import { useParams, useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import {
   getRoomByCode,
@@ -10,6 +10,8 @@ import {
   getOrCreateFamily,
   createVote,
   getVoteByFamilyAndRound,
+  getFamiliesByRoom,
+  getVotesByRound,
 } from '@/lib/utils';
 import type { Room, Round, Photo, Family, Vote } from '@/lib/types';
 
@@ -17,6 +19,7 @@ type FamilyLabel = '신랑네' | '신부네' | '우리부부';
 
 export default function VotePage() {
   const params = useParams();
+  const router = useRouter();
   const code = params.code as string;
 
   const [room, setRoom] = useState<Room | null>(null);
@@ -28,6 +31,7 @@ export default function VotePage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [familySelection, setFamilySelection] = useState<FamilyLabel | null>(null);
+  const [allFamiliesVoted, setAllFamiliesVoted] = useState(false);
 
   // Load room data
   useEffect(() => {
@@ -70,6 +74,9 @@ export default function VotePage() {
           // Load current round data when round changes
           if (updatedRoom.current_round) {
             await loadRoundData(updatedRoom.id, updatedRoom.current_round);
+          } else if (updatedRoom.status === 'finished') {
+            // All rounds finished, redirect to result
+            router.push(`/room/${code}/result`);
           }
         }
       )
@@ -78,7 +85,29 @@ export default function VotePage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [room]);
+  }, [room, code, router]);
+
+  // Check if all families voted
+  const checkAllFamiliesVoted = async (roomId: string, roundId: string) => {
+    try {
+      const families = await getFamiliesByRoom(roomId);
+      const votes = await getVotesByRound(roundId);
+      const allVoted = families.length > 0 && families.every((f) =>
+        votes.some((v) => v.family_id === f.id)
+      );
+      setAllFamiliesVoted(allVoted);
+      
+      // If all families voted and current user also voted, redirect to discussion
+      if (allVoted && voted && family) {
+        // Small delay to ensure vote is saved and to show the "선택 완료" message
+        setTimeout(() => {
+          router.push(`/room/${code}/discussion`);
+        }, 1500);
+      }
+    } catch (err) {
+      console.error('가족 투표 확인 실패:', err);
+    }
+  };
 
   // Load round data when current_round changes
   const loadRoundData = async (roomId: string, roundNumber: number) => {
@@ -106,6 +135,9 @@ export default function VotePage() {
             setSelectedPhotoId(null);
           }
         }
+
+        // Check if all families voted
+        await checkAllFamiliesVoted(roomId, round.id);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '라운드 로드 실패');
@@ -117,6 +149,31 @@ export default function VotePage() {
       loadRoundData(room.id, room.current_round);
     }
   }, [room?.current_round, family]);
+
+  // Subscribe to votes to check when all families voted
+  useEffect(() => {
+    if (!currentRound || !room || !family) return;
+
+    const channel = supabase
+      .channel(`votes:${currentRound.id}`)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'votes',
+          filter: `round_id=eq.${currentRound.id}`,
+        },
+        async () => {
+          await checkAllFamiliesVoted(room.id, currentRound.id);
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [currentRound, room, family, voted]);
 
   const handleSelectFamily = async (label: FamilyLabel) => {
     if (!room) return;
@@ -153,6 +210,9 @@ export default function VotePage() {
       });
       setSelectedPhotoId(photoId);
       setVoted(true);
+      
+      // Check if all families voted after voting
+      await checkAllFamiliesVoted(room.id, currentRound.id);
     } catch (err) {
       setError(err instanceof Error ? err.message : '투표 실패');
     } finally {
