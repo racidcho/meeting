@@ -42,7 +42,7 @@ export async function updateRoom(
 ): Promise<void> {
   const { error } = await supabase
     .from('rooms')
-    .update(updates)
+    .update(updates as any)
     .eq('id', roomId);
 
   if (error) throw error;
@@ -126,7 +126,7 @@ export async function updateRound(
 ): Promise<void> {
   const { error } = await supabase
     .from('rounds')
-    .update(updates)
+    .update(updates as any)
     .eq('id', roundId);
 
   if (error) throw error;
