@@ -379,9 +379,9 @@ export default function DiscussionPage() {
         return;
       }
 
-      if (!currentRound.winning_photo_id) {
+      if (!currentRound.winning_photo_id && winningPhotoId) {
         await updateRound(currentRound.id, {
-          winning_photo_id,
+          winning_photo_id: winningPhotoId,
           tie_photos: null,
         });
       }

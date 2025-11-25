@@ -14,7 +14,7 @@ export async function createRoom(): Promise<Room> {
   const code = generateRoomCode();
   const { data, error } = await supabase
     .from('rooms')
-    .insert({ code, status: 'lobby' })
+    .insert({ code, status: 'lobby' } as any)
     .select()
     .single();
 

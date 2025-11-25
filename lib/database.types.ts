@@ -89,6 +89,7 @@ export interface Database {
           round_number: number
           photo_ids: string[]
           winning_photo_id: string | null
+          tie_photos: string[] | null
           created_at: string
         }
         Insert: {
@@ -97,6 +98,7 @@ export interface Database {
           round_number: number
           photo_ids: string[]
           winning_photo_id?: string | null
+          tie_photos?: string[] | null
           created_at?: string
         }
         Update: {
@@ -105,6 +107,7 @@ export interface Database {
           round_number?: number
           photo_ids?: string[]
           winning_photo_id?: string | null
+          tie_photos?: string[] | null
           created_at?: string
         }
       }
