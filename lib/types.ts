@@ -31,6 +31,7 @@ export interface Round {
   round_number: number;
   photo_ids: string[];
   winning_photo_id: string | null;
+  tie_photos: string[] | null; // 동점인 사진들의 ID 배열
   created_at: string;
 }
 

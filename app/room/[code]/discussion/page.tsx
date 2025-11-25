@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabaseClient';
 import {
@@ -12,8 +12,11 @@ import {
   updateRound,
   updateRoom,
   getRoundsByRoom,
+  calculateWinningPhoto,
 } from '@/lib/utils';
-import type { Room, Round, Photo, Family, Vote } from '@/lib/types';
+import type { Room, Round, Photo, Family, Vote, FamilyLabel } from '@/lib/types';
+import confetti from 'canvas-confetti';
+import RouletteModal from '@/app/components/RouletteModal';
 
 export default function DiscussionPage() {
   const params = useParams();
@@ -28,6 +31,13 @@ export default function DiscussionPage() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [isHost, setIsHost] = useState(false);
+  const [nextRoundNumber, setNextRoundNumber] = useState<number | null>(null);
+  const lastRoundNumberRef = useRef<number | null>(null);
+  const celebratedRoundsRef = useRef<Set<string>>(new Set());
+
+  // Roulette State
+  const [showRoulette, setShowRoulette] = useState(false);
+  const [rouletteTargetWinner, setRouletteTargetWinner] = useState<FamilyLabel | null>(null);
 
   // Check if user is host (from localStorage)
   useEffect(() => {
@@ -48,6 +58,8 @@ export default function DiscussionPage() {
           setFamilies(familiesData);
 
           if (roomData.current_round) {
+            // Initialize last round number before loading
+            lastRoundNumberRef.current = roomData.current_round;
             await loadRoundData(roomData.id, roomData.current_round);
             // Ensure votes are loaded after round data is set
             const round = await getRoundByRoomAndNumber(roomData.id, roomData.current_round);
@@ -81,9 +93,20 @@ export default function DiscussionPage() {
         },
         async (payload) => {
           const updatedRoom = payload.new as Room;
+          const previousRoundNumber = lastRoundNumberRef.current;
           setRoom(updatedRoom);
 
           if (updatedRoom.current_round) {
+            const isNewRound = previousRoundNumber !== null && 
+                              updatedRoom.current_round > previousRoundNumber;
+            
+            // All users (including host) automatically return to the voting screen when new round starts
+            if (isNewRound) {
+              console.log('[Discussion] New round detected:', previousRoundNumber, '->', updatedRoom.current_round);
+              router.push(`/room/${code}/vote`);
+              return;
+            }
+            
             await loadRoundData(updatedRoom.id, updatedRoom.current_round);
           } else if (updatedRoom.status === 'finished') {
             // All rounds finished, redirect to result
@@ -96,7 +119,35 @@ export default function DiscussionPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [room, code, router]);
+  }, [room, code, router, isHost]);
+
+  // Fallback: Poll for room updates every 2 seconds to ensure we catch round changes
+  useEffect(() => {
+    if (!room || !code) return;
+
+    const pollRoomStatus = async () => {
+      try {
+        const updatedRoom = await getRoomByCode(code);
+        if (updatedRoom && updatedRoom.current_round) {
+          // If room has moved to next round
+          if (currentRound && updatedRoom.current_round > currentRound.round_number) {
+            console.log('[Discussion] Polling detected new round. Redirecting to vote.');
+            router.push(`/room/${code}/vote`);
+          } else if (updatedRoom.current_round !== room.current_round) {
+             // Sync local room state if changed but not necessarily a new round (e.g. status change)
+             setRoom(updatedRoom);
+          }
+        } else if (updatedRoom?.status === 'finished') {
+           router.push(`/room/${code}/result`);
+        }
+      } catch (err) {
+        console.error('Room polling error:', err);
+      }
+    };
+
+    const intervalId = setInterval(pollRoomStatus, 2000);
+    return () => clearInterval(intervalId);
+  }, [room, currentRound, code, router]);
 
   // Subscribe to families (to catch newly added families)
   useEffect(() => {
@@ -123,6 +174,42 @@ export default function DiscussionPage() {
       supabase.removeChannel(channel);
     };
   }, [room]);
+
+  // Subscribe to broadcast for roulette
+  useEffect(() => {
+    if (!room) return;
+
+    const channel = supabase.channel(`room:${room.id}`);
+
+    channel
+      .on('broadcast', { event: 'spin-roulette' }, (payload) => {
+        console.log('Received spin-roulette:', payload);
+        // Start spinning if we are in the correct round
+        // We check roundId but strictly we might want to just spin if the modal is open or expected
+        if (currentRound && payload.payload.roundId === currentRound.id) {
+           setShowRoulette(true);
+           setRouletteTargetWinner(payload.payload.winner);
+        }
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [room, currentRound]);
+
+  // Check for tie on load to show modal (waiting state)
+  useEffect(() => {
+      if (currentRound?.tie_photos && currentRound.tie_photos.length > 0 && !currentRound.winning_photo_id) {
+          setShowRoulette(true);
+      } else {
+          // If winner exists or no tie, close modal ONLY IF we are not currently spinning/showing result
+          // This prevents closing the modal mid-spin if the DB update arrives early
+          if (!rouletteTargetWinner) {
+             setShowRoulette(false);
+          }
+      }
+  }, [currentRound, rouletteTargetWinner]);
 
   // Subscribe to votes
   useEffect(() => {
@@ -177,11 +264,62 @@ export default function DiscussionPage() {
     };
   }, [currentRound, room, families.length]);
 
+  // Check for unanimous vote and trigger confetti
+  useEffect(() => {
+    if (votes.length >= 3 && families.length >= 3 && currentRound) {
+      if (celebratedRoundsRef.current.has(currentRound.id)) {
+        return;
+      }
+
+      try {
+        const { winningPhotoId, isTie } = calculateWinningPhoto(votes);
+        const isUnanimous = !isTie && winningPhotoId && votes.every(v => v.photo_id === winningPhotoId);
+        
+        if (isUnanimous) {
+          celebratedRoundsRef.current.add(currentRound.id);
+          // Fire fireworks/confetti
+          const duration = 3 * 1000;
+          const animationEnd = Date.now() + duration;
+          const defaults = { startVelocity: 30, spread: 360, ticks: 60, zIndex: 0 };
+
+          // Play cheering sound
+          try {
+            const audio = new Audio('/sounds/cheering.mp3');
+            audio.volume = 0.5;
+            audio.play().catch(e => console.log('Audio play failed', e));
+          } catch (e) {
+            console.log('Audio error', e);
+          }
+
+          const randomInRange = (min: number, max: number) => Math.random() * (max - min) + min;
+
+          const interval = setInterval(function() {
+            const timeLeft = animationEnd - Date.now();
+
+            if (timeLeft <= 0) {
+              return clearInterval(interval);
+            }
+
+            const particleCount = 50 * (timeLeft / duration);
+            // since particles fall down, start a bit higher than random
+            confetti({ ...defaults, particleCount, origin: { x: randomInRange(0.1, 0.3), y: Math.random() - 0.2 } });
+            confetti({ ...defaults, particleCount, origin: { x: randomInRange(0.7, 0.9), y: Math.random() - 0.2 } });
+          }, 250);
+
+          return () => clearInterval(interval);
+        }
+      } catch (e) {
+        // Ignore errors during calculation
+      }
+    }
+  }, [votes, families, currentRound]);
+
   const loadRoundData = async (roomId: string, roundNumber: number) => {
     try {
       const round = await getRoundByRoomAndNumber(roomId, roundNumber);
       if (round) {
         setCurrentRound(round);
+        lastRoundNumberRef.current = round.round_number;
         const allPhotos = await getPhotosByRoom(roomId);
         const roundPhotos = allPhotos.filter((p) =>
           round.photo_ids.includes(p.id)
@@ -195,6 +333,11 @@ export default function DiscussionPage() {
         // Reload votes to ensure all votes are included
         const votesData = await getVotesByRound(round.id);
         setVotes(votesData);
+
+        const allRounds = await getRoundsByRoom(roomId);
+        const possibleNext = round.round_number + 1;
+        const hasNext = allRounds.some((r) => r.round_number === possibleNext);
+        setNextRoundNumber(hasNext ? possibleNext : null);
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '라운드 로드 실패');
@@ -204,24 +347,44 @@ export default function DiscussionPage() {
   const handleEndRound = async () => {
     if (!room || !currentRound) return;
 
+    if (currentRound.tie_photos && currentRound.tie_photos.length > 0) {
+      setError('동점입니다. 룰렛으로 승자를 결정해주세요.');
+      return;
+    }
+
     try {
       setLoading(true);
       setError(null);
 
-      // Calculate winning photo (most votes)
-      const voteCounts: Record<string, number> = {};
-      votes.forEach((vote) => {
-        voteCounts[vote.photo_id] = (voteCounts[vote.photo_id] || 0) + 1;
-      });
+      let winningPhotoId = currentRound.winning_photo_id;
+      let isTie = false;
+      let tiePhotos: string[] = [];
 
-      const winningPhotoId = Object.entries(voteCounts).reduce((a, b) =>
-        voteCounts[a[0]] > voteCounts[b[0]] ? a : b
-      )[0];
+      if (!winningPhotoId) {
+        const result = calculateWinningPhoto(votes);
+        winningPhotoId = result.winningPhotoId;
+        isTie = result.isTie;
+        tiePhotos = result.tiePhotos;
+      }
 
-      // Update round with winning photo
-      await updateRound(currentRound.id, {
-        winning_photo_id: winningPhotoId,
-      });
+      if (isTie || !winningPhotoId) {
+        await updateRound(currentRound.id, {
+          winning_photo_id: null,
+          tie_photos: tiePhotos,
+        });
+        setCurrentRound((prev) =>
+          prev ? { ...prev, winning_photo_id: null, tie_photos: tiePhotos } : prev
+        );
+        setError('동점입니다! 룰렛으로 승자를 결정해 주세요.');
+        return;
+      }
+
+      if (!currentRound.winning_photo_id) {
+        await updateRound(currentRound.id, {
+          winning_photo_id,
+          tie_photos: null,
+        });
+      }
 
       // Move to next round or finish
       const nextRound = currentRound.round_number + 1;
@@ -230,16 +393,12 @@ export default function DiscussionPage() {
 
       if (hasNextRound) {
         await updateRoom(room.id, {
-          current_round: nextRound,
-          status: 'in_progress',
+          status: 'lobby',
+          current_round: currentRound.round_number,
         });
-        await loadRoundData(room.id, nextRound);
         const updatedRoom = await getRoomByCode(room.code);
         if (updatedRoom) setRoom(updatedRoom);
-        // Redirect to vote page for next round
-        router.push(`/room/${code}/vote`);
       } else {
-        // All rounds finished
         await updateRoom(room.id, {
           status: 'finished',
           current_round: null,
@@ -248,6 +407,26 @@ export default function DiscussionPage() {
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : '라운드 종료 실패');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleStartNextRound = async () => {
+    if (!room || nextRoundNumber === null) return;
+
+    try {
+      setLoading(true);
+      setError(null);
+
+      await updateRoom(room.id, {
+        current_round: nextRoundNumber,
+        status: 'in_progress',
+      });
+
+      router.push(`/room/${code}/vote`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '���� ���� ����');
     } finally {
       setLoading(false);
     }
@@ -281,6 +460,7 @@ export default function DiscussionPage() {
   });
 
   const allVoted = families.length >= 3 && voteSummary.every((vs) => vs.vote);
+  const tiePending = Boolean(currentRound.tie_photos && currentRound.tie_photos.length > 0);
 
   return (
     <div className="min-h-screen p-4 bg-beige">
@@ -293,6 +473,47 @@ export default function DiscussionPage() {
           <p className="text-lg text-gray-600 mt-2">
             각 가족이 선택한 사진을 확인하고 이야기를 나눠보세요
           </p>
+          
+          {/* Round Result Status Message */}
+          {voteSummary.every(v => v.vote) && (() => {
+            try {
+              // Only calculate if we have votes from all families (or at least some votes)
+              if (votes.length === 0) return null;
+              
+              const { winningPhotoId, isTie } = calculateWinningPhoto(votes);
+              
+              if (isTie) {
+                return (
+                  <div className="mt-4 p-3 bg-yellow-100 text-yellow-800 rounded-lg inline-block animate-bounce">
+                    <p className="font-bold text-lg">⚠️ 1:1:1 동점입니다!</p>
+                    <p className="text-sm">호스트가 룰렛을 돌려 승자를 정하면 이 화면이 자동으로 업데이트됩니다.</p>
+                  </div>
+                );
+              } else if (winningPhotoId) {
+                 const isUnanimous = votes.every(v => v.photo_id === winningPhotoId);
+                 
+                 if (isUnanimous) {
+                   return (
+                     <div className="mt-4 p-6 bg-gradient-to-r from-pink-100 via-red-100 to-pink-100 border-4 border-pink-300 text-pink-800 rounded-2xl inline-block shadow-xl transform transition hover:scale-105">
+                       <p className="font-black text-3xl mb-2">🎊 만장일치! 🎊</p>
+                       <p className="text-xl font-bold">모든 가족의 마음이 하나로 통했네요! ❤️</p>
+                       <p className="text-md mt-2 text-pink-600">화기애애한 분위기 속에서 다음 라운드로 Go!</p>
+                     </div>
+                   );
+                 }
+
+                 // Find which family voted for the winner (optional, or just show photo)
+                 return (
+                  <div className="mt-4 p-3 bg-blue-100 text-blue-800 rounded-lg inline-block">
+                    <p className="font-bold text-lg">🎉 승자가 결정되었습니다!</p>
+                    <p className="text-sm">다수결로 선정된 사진이 있습니다.</p>
+                  </div>
+                );
+              }
+            } catch (e) {
+              return null;
+            }
+          })()}
         </div>
 
         {error && (
@@ -336,21 +557,51 @@ export default function DiscussionPage() {
           ))}
         </div>
 
+        {tiePending && (
+          <div className="bg-pink-50 border-2 border-pink-200 rounded-xl p-6 shadow-inner text-center space-y-2">
+            <p className="text-xl font-bold text-pink-700">⚖️ 1:1:1 동점입니다!</p>
+            <p className="text-sm text-pink-600">
+              호스트 페이지에서 룰렛을 돌려 행운의 가족을 결정할 때까지 잠시만 기다려 주세요.
+            </p>
+            <p className="text-sm text-pink-500">
+              룰렛 결과가 확정되면 이 화면이 자동으로 업데이트됩니다.
+            </p>
+          </div>
+        )}
+
         {/* Host Controls */}
-        {isHost && allVoted && (
+        {isHost && room.status === 'in_progress' && allVoted && (
           <div className="text-center bg-white rounded-lg p-6 shadow-lg">
             <p className="text-lg text-gray-700 mb-4">
               모든 가족이 선택을 완료했습니다.
             </p>
             <p className="text-sm text-gray-600 mb-6">
-              이야기를 나눈 후, 다음 라운드로 진행하세요.
+              이야기를 나눈 뒤 라운드를 종료해 주세요.
             </p>
             <button
               onClick={handleEndRound}
               disabled={loading}
               className="px-8 py-4 bg-gold text-white rounded-lg text-xl font-semibold hover:bg-opacity-90 transition disabled:opacity-50"
             >
-              {loading ? '처리 중...' : '다음 라운드로 진행'}
+              {loading ? '처리 중...' : '라운드 종료'}
+            </button>
+          </div>
+        )}
+
+        {isHost && room.status === 'lobby' && nextRoundNumber && (
+          <div className="text-center bg-white rounded-lg p-6 shadow-lg">
+            <p className="text-lg text-gray-700 mb-4">
+              토론이 끝나면 다음 라운드를 시작하세요.
+            </p>
+            <p className="text-sm text-gray-600 mb-6">
+              시작 버튼을 눌러야 모든 가족이 라운드 {nextRoundNumber} 투표 화면으로 이동합니다.
+            </p>
+            <button
+              onClick={handleStartNextRound}
+              disabled={loading}
+              className="px-8 py-4 bg-blue-500 text-white rounded-lg text-xl font-semibold hover:bg-opacity-90 transition disabled:opacity-50"
+            >
+              {loading ? '시작 준비...' : `라운드 ${nextRoundNumber} 시작`}
             </button>
           </div>
         )}
@@ -386,6 +637,19 @@ export default function DiscussionPage() {
               ))}
             </div>
           </div>
+        )}
+
+        {/* Roulette Modal */}
+        {showRoulette && currentRound && (
+          <RouletteModal
+            roundNumber={currentRound.round_number}
+            onClose={() => setShowRoulette(false)}
+            onComplete={() => {
+              setShowRoulette(false);
+              setRouletteTargetWinner(null);
+            }}
+            targetWinner={rouletteTargetWinner}
+          />
         )}
       </div>
     </div>

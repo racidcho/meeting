@@ -74,7 +74,8 @@ CREATE POLICY "Allow all operations on photos" ON photos FOR ALL USING (true) WI
 CREATE POLICY "Allow all operations on rounds" ON rounds FOR ALL USING (true) WITH CHECK (true);
 CREATE POLICY "Allow all operations on votes" ON votes FOR ALL USING (true) WITH CHECK (true);
 
--- Enable Realtime for rooms and votes
+-- Enable Realtime for rooms, families, and votes
 ALTER PUBLICATION supabase_realtime ADD TABLE rooms;
+ALTER PUBLICATION supabase_realtime ADD TABLE families;
 ALTER PUBLICATION supabase_realtime ADD TABLE votes;
 

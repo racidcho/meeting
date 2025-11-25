@@ -213,6 +213,22 @@ export async function getVoteByFamilyAndRound(
   return data;
 }
 
+export async function deleteVote(voteId: string): Promise<void> {
+  const { error } = await supabase.from('votes').delete().eq('id', voteId);
+  if (error) throw error;
+}
+
+export async function deleteVotesByRound(roundId: string, familyId?: string): Promise<void> {
+  let query = supabase.from('votes').delete().eq('round_id', roundId);
+  
+  if (familyId) {
+    query = query.eq('family_id', familyId);
+  }
+  
+  const { error } = await query;
+  if (error) throw error;
+}
+
 // Helper: Shuffle array
 export function shuffleArray<T>(array: T[]): T[] {
   const shuffled = [...array];
@@ -221,6 +237,44 @@ export function shuffleArray<T>(array: T[]): T[] {
     [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
   }
   return shuffled;
+}
+
+// Helper: Calculate winning photo with tie handling
+// Returns the winning photo ID (null if tie) and tie information
+export function calculateWinningPhoto(votes: Vote[]): {
+  winningPhotoId: string | null;
+  isTie: boolean;
+  tiePhotos: string[];
+} {
+  if (votes.length === 0) {
+    throw new Error('투표가 없습니다.');
+  }
+
+  // Count votes for each photo
+  const voteCounts: Record<string, number> = {};
+  votes.forEach((vote) => {
+    voteCounts[vote.photo_id] = (voteCounts[vote.photo_id] || 0) + 1;
+  });
+
+  // Find maximum vote count
+  const maxVotes = Math.max(...Object.values(voteCounts));
+
+  // Find all photos with maximum votes (handle ties)
+  const tiedPhotos = Object.entries(voteCounts)
+    .filter(([_, count]) => count === maxVotes)
+    .map(([photoId]) => photoId);
+
+  const isTie = tiedPhotos.length > 1;
+
+  // If tie, return null (will be handled later with retie)
+  // If no tie, return the winning photo ID
+  const winningPhotoId = isTie ? null : tiedPhotos[0];
+
+  return {
+    winningPhotoId,
+    isTie,
+    tiePhotos: tiedPhotos,
+  };
 }
 
 // Helper: Create rounds from photos (3 photos per round)

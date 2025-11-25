@@ -2,8 +2,10 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { createRoom, addPhoto, getPhotosByRoom, generateRounds, getRoundsByRoom, updateRoom, getRoomByCode, getVotesByRound, updateRound } from '@/lib/utils';
-import type { Room, Photo, Round } from '@/lib/types';
+import { createRoom, addPhoto, getPhotosByRoom, generateRounds, getRoundsByRoom, updateRoom, getRoomByCode, getVotesByRound, updateRound, calculateWinningPhoto, getFamiliesByRoom } from '@/lib/utils';
+import { supabase } from '@/lib/supabaseClient';
+import type { Room, Photo, Round, FamilyLabel } from '@/lib/types';
+import RouletteModal from '@/app/components/RouletteModal';
 
 export default function HostPage() {
   const router = useRouter();
@@ -13,6 +15,107 @@ export default function HostPage() {
   const [photoUrls, setPhotoUrls] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  
+  // Roulette State
+  const [showRoulette, setShowRoulette] = useState(false);
+  const [rouletteError, setRouletteError] = useState<string | null>(null);
+  const [rouletteLoading, setRouletteLoading] = useState(false);
+  const [pendingTieRound, setPendingTieRound] = useState<Round | null>(null);
+  const [rouletteTargetWinner, setRouletteTargetWinner] = useState<FamilyLabel | null>(null);
+
+  const handleHostSpin = async () => {
+    if (!room || !pendingTieRound) return;
+    
+    // 1. Pick random winner locally
+    const families: FamilyLabel[] = ['신랑네', '신부네', '우리부부'];
+    const winner = families[Math.floor(Math.random() * families.length)];
+    
+    setRouletteTargetWinner(winner);
+    
+    // 2. Broadcast spin event
+    try {
+      await supabase.channel(`room:${room.id}`).send({
+        type: 'broadcast',
+        event: 'spin-roulette',
+        payload: { winner, roundId: pendingTieRound.id }
+      });
+    } catch (err) {
+      console.error('Broadcast failed:', err);
+      // Continue locally anyway
+    }
+  };
+
+  const handleRouletteComplete = async () => {
+    // Animation finished, now update DB
+    if (!room || !pendingTieRound || !rouletteTargetWinner) return;
+
+    try {
+      setRouletteLoading(true);
+      setRouletteError(null);
+
+      const winnerLabel = rouletteTargetWinner;
+
+      // 1. Find the family ID for the winner label
+      const families = await getFamiliesByRoom(room.id);
+      const winningFamily = families.find(f => f.label === winnerLabel);
+      
+      if (!winningFamily) {
+        throw new Error('당첨된 가족 정보를 찾을 수 없습니다.');
+      }
+
+      // 2. Find what photo they voted for in this round
+      const votes = await getVotesByRound(pendingTieRound.id);
+      const winningVote = votes.find(v => v.family_id === winningFamily.id);
+      
+      if (!winningVote) {
+        throw new Error(`${winnerLabel}의 투표 정보를 찾을 수 없습니다.`);
+      }
+
+      // 3. Update the round with the winning photo
+      await updateRound(pendingTieRound.id, {
+        winning_photo_id: winningVote.photo_id,
+        tie_photos: null // Clear tie status explicitly
+      });
+
+      // Update local state
+      setRounds((prevRounds) =>
+        prevRounds.map((r) =>
+          r.id === pendingTieRound.id
+            ? { ...r, winning_photo_id: winningVote.photo_id, tie_photos: null }
+            : r
+        )
+      );
+      
+      // 4. Move to next round or finish (Logic duplicated from handleEndRound, could be refactored)
+      const nextRound = pendingTieRound.round_number + 1;
+      const hasNextRound = rounds.some((r) => r.round_number === nextRound);
+
+      if (hasNextRound) {
+         await updateRoom(room.id, {
+           current_round: pendingTieRound.round_number,
+           status: 'lobby',
+         });
+      } else {
+         await updateRoom(room.id, {
+           status: 'finished',
+           current_round: null,
+         });
+      }
+      
+      setPendingTieRound(null);
+      setShowRoulette(false);
+      setRouletteTargetWinner(null);
+
+    } catch (err) {
+      console.error('룰렛 결과 처리 실패:', err);
+      setRouletteError('결과 처리 중 오류가 발생했습니다.');
+      // Do not close modal on error so they can try again? 
+      // Actually better to reset spin and let them try again.
+      setRouletteTargetWinner(null); 
+    } finally {
+      setRouletteLoading(false);
+    }
+  };
 
   const handleCreateRoom = async () => {
     try {
@@ -111,6 +214,47 @@ export default function HostPage() {
   const handleEndRound = async (roundId: string, roundNumber: number) => {
     if (!room) return;
 
+    // Check for existing tie
+    const currentRound = rounds.find((r) => r.id === roundId);
+    if (currentRound && currentRound.tie_photos && currentRound.tie_photos.length > 0) {
+      setPendingTieRound(currentRound);
+      setShowRoulette(true);
+      return;
+    }
+    
+    // Check if already finished (has winner) - Just advance state
+    if (currentRound && currentRound.winning_photo_id) {
+      try {
+        setLoading(true);
+        // Move to next round or finish
+        const nextRound = roundNumber + 1;
+        const hasNextRound = rounds.some((r) => r.round_number === nextRound);
+
+        if (hasNextRound) {
+          await updateRoom(room.id, {
+            current_round: roundNumber,
+            status: 'lobby',
+          });
+        } else {
+          await updateRoom(room.id, {
+            status: 'finished',
+            current_round: null,
+          });
+        }
+        
+        // Reload data
+        const updatedRoom = await getRoomByCode(room.code);
+        if (updatedRoom) {
+          setRoom(updatedRoom);
+        }
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '라운드 종료 실패');
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
     try {
       setLoading(true);
       setError(null);
@@ -118,21 +262,32 @@ export default function HostPage() {
       // Get votes for this round
       const votes = await getVotesByRound(roundId);
       
-      // Calculate winning photo (most votes)
+      // Calculate winning photo (most votes) with tie handling
       if (votes.length > 0) {
-        const voteCounts: Record<string, number> = {};
-        votes.forEach((vote) => {
-          voteCounts[vote.photo_id] = (voteCounts[vote.photo_id] || 0) + 1;
-        });
+        const { winningPhotoId, isTie, tiePhotos } = calculateWinningPhoto(votes);
 
-        const winningPhotoId = Object.entries(voteCounts).reduce((a, b) =>
-          voteCounts[a[0]] > voteCounts[b[0]] ? a : b
-        )[0];
-
-        // Update round with winning photo
-        await updateRound(roundId, {
-          winning_photo_id: winningPhotoId,
-        });
+        // Update round with winning photo or tie information
+        if (isTie) {
+          // 동점인 경우: winning_photo_id는 null, tie_photos에 동점 사진들 저장
+          await updateRound(roundId, {
+            winning_photo_id: null,
+            tie_photos: tiePhotos,
+          });
+          
+          // Update local state immediately to reflect tie
+          const updatedRound = { ...currentRound!, tie_photos: tiePhotos, winning_photo_id: null };
+          setRounds((prev) => prev.map((r) => r.id === roundId ? updatedRound : r));
+          setPendingTieRound(updatedRound);
+          setShowRoulette(true);
+          setError('동점입니다! 룰렛으로 승자를 결정해주세요.');
+          return; // Stop here to handle roulette
+        } else {
+          // 동점이 아닌 경우: winning_photo_id 저장, tie_photos는 null
+          await updateRound(roundId, {
+            winning_photo_id: winningPhotoId,
+            tie_photos: null,
+          });
+        }
       }
       
       // Move to next round or finish
@@ -141,8 +296,8 @@ export default function HostPage() {
 
       if (hasNextRound) {
         await updateRoom(room.id, {
-          current_round: nextRound,
-          status: 'in_progress',
+          current_round: roundNumber,
+          status: 'lobby',
         });
       } else {
         await updateRoom(room.id, {
@@ -299,9 +454,21 @@ export default function HostPage() {
             <div className="space-y-3">
               {rounds.map((round) => {
                 const isCurrentRound = room.current_round === round.round_number;
-                const isFinished = room.status === 'finished';
-                const canStart = !isCurrentRound && room.status !== 'in_progress';
-                const canEnd = isCurrentRound && room.status === 'in_progress';
+                const unfinishedRounds = rounds.filter(
+                  (r) =>
+                    !r.winning_photo_id &&
+                    (!r.tie_photos || r.tie_photos.length === 0)
+                );
+                const nextRoundToStart = unfinishedRounds[0];
+                const canStart =
+                  room.status === 'lobby' &&
+                  nextRoundToStart &&
+                  nextRoundToStart.id === round.id;
+                const canEnd =
+                  isCurrentRound &&
+                  room.status === 'in_progress';
+                
+                const isTie = round.tie_photos && round.tie_photos.length > 0;
 
                 return (
                   <div
@@ -319,6 +486,9 @@ export default function HostPage() {
                         </h3>
                         {round.winning_photo_id && (
                           <p className="text-sm text-gray-600">✅ 완료</p>
+                        )}
+                        {isTie && !round.winning_photo_id && (
+                          <p className="text-sm text-red-600 font-bold">⚠️ 1:1:1 동점 (룰렛 필요)</p>
                         )}
                       </div>
                       <div className="flex gap-2">
@@ -340,6 +510,17 @@ export default function HostPage() {
                             종료
                           </button>
                         )}
+                        {isTie && !round.winning_photo_id && (
+                          <button
+                            onClick={() => {
+                              setPendingTieRound(round);
+                              setShowRoulette(true);
+                            }}
+                            className="px-4 py-2 bg-purple-500 text-white rounded-lg font-semibold hover:bg-opacity-90 transition animate-pulse"
+                          >
+                            🎲 룰렛 돌리기
+                          </button>
+                        )}
                       </div>
                     </div>
                   </div>
@@ -355,6 +536,19 @@ export default function HostPage() {
               </button>
             )}
           </div>
+        )}
+        
+        {/* Roulette Modal */}
+        {showRoulette && pendingTieRound && (
+          <RouletteModal
+            roundNumber={pendingTieRound.round_number}
+            onClose={() => {
+              if (!rouletteLoading) setShowRoulette(false);
+            }}
+            onComplete={handleRouletteComplete}
+            targetWinner={rouletteTargetWinner}
+            onRequestSpin={handleHostSpin}
+          />
         )}
       </div>
     </div>

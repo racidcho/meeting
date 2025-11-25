@@ -1,12 +1,17 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { useParams } from 'next/navigation';
-import { getRoomByCode, getRoundsByRoom, getPhotosByRoom } from '@/lib/utils';
+import { useParams, useRouter } from 'next/navigation';
+import { 
+  getRoomByCode, 
+  getRoundsByRoom, 
+  getPhotosByRoom
+} from '@/lib/utils';
 import type { Room, Round, Photo } from '@/lib/types';
 
 export default function ResultPage() {
   const params = useParams();
+  const router = useRouter();
   const code = params.code as string;
 
   const [room, setRoom] = useState<Room | null>(null);
@@ -19,37 +24,37 @@ export default function ResultPage() {
 
   useEffect(() => {
     if (!code) return;
-
-    const loadData = async () => {
-      try {
-        const roomData = await getRoomByCode(code);
-        if (roomData) {
-          setRoom(roomData);
-          const roundsData = await getRoundsByRoom(roomData.id);
-          setRounds(roundsData);
-          const photosData = await getPhotosByRoom(roomData.id);
-          setAllPhotos(photosData);
-
-          // Get winning photos
-          const winners = roundsData
-            .filter((r) => r.winning_photo_id)
-            .map((r) => {
-              const photo = photosData.find((p) => p.id === r.winning_photo_id);
-              return photo;
-            })
-            .filter((p): p is Photo => p !== undefined);
-
-          setWinningPhotos(winners);
-        }
-      } catch (err) {
-        console.error('데이터 로드 실패:', err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
     loadData();
   }, [code]);
+
+  const loadData = async () => {
+    try {
+      const roomData = await getRoomByCode(code);
+      if (roomData) {
+        setRoom(roomData);
+        const roundsData = await getRoundsByRoom(roomData.id);
+        setRounds(roundsData);
+        const photosData = await getPhotosByRoom(roomData.id);
+        setAllPhotos(photosData);
+
+        // Get winning photos
+        const winners = roundsData
+          .filter((r) => r.winning_photo_id)
+          .map((r) => {
+            const photo = photosData.find((p) => p.id === r.winning_photo_id);
+            return photo;
+          })
+          .filter((p): p is Photo => p !== undefined);
+
+        setWinningPhotos(winners);
+
+      }
+    } catch (err) {
+      console.error('데이터 로드 실패:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const handleNextSlide = () => {
     setCurrentSlide((prev) => (prev + 1) % winningPhotos.length);

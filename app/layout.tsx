@@ -1,5 +1,7 @@
 import type { Metadata } from 'next'
 import './globals.css'
+import AccessibilityControls from './components/AccessibilityControls'
+import BackgroundMusic from './components/BackgroundMusic'
 
 export const metadata: Metadata = {
   title: '상견례 사진 투표',
@@ -13,7 +15,11 @@ export default function RootLayout({
 }) {
   return (
     <html lang="ko">
-      <body>{children}</body>
+      <body>
+        {children}
+        <AccessibilityControls />
+        <BackgroundMusic />
+      </body>
     </html>
   )
 }
